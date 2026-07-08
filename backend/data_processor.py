@@ -72,7 +72,7 @@ def smart_parse_dates(series):
     return parsed
 
 # --- HELPER: Smart Text Correction ---
-def smart_text_correction(df, logs):
+def smart_text_correction(df, logs, threshold=0.75):
     text_cols = df.select_dtypes(include=['object']).columns
     for col in text_cols:
         if df[col].nunique() > len(df) * 0.9: continue
@@ -85,7 +85,7 @@ def smart_text_correction(df, logs):
                 if i == j: continue
                 if not isinstance(val2, str): continue
                 ratio = SequenceMatcher(None, val1.lower(), val2.lower()).ratio()
-                if ratio > 0.75:
+                if ratio > threshold:
                     if value_counts[val2] > value_counts[val1] * 2:
                         corrections[val1] = val2
                         if f"Auto-Corrected '{val1}'" not in logs: logs.append(f"Auto-Corrected '{val1}' to '{val2}' in {col}")
@@ -235,7 +235,7 @@ def generate_pdf_report(df, insights, output_path):
     doc.build(story)
 
 
-def process_dataset(file_content, filename, mask_pii=True):
+def process_dataset(file_content, filename, mask_pii=True, impute_numeric="median", anomaly_contamination=0.05, run_typo_correction=True, typo_threshold=0.75, run_date_formatting=True, run_numeric_parsing=True):
     try:
         if filename.endswith('.csv'):
             try: df = pd.read_csv(BytesIO(file_content), encoding='utf-8')
@@ -255,28 +255,48 @@ def process_dataset(file_content, filename, mask_pii=True):
             df[col] = df[col].astype(str).str.strip().str.title()
             df[col] = df[col].replace({'Nan': 'Unknown', 'None': 'Unknown', 'Na': 'Unknown', 'Pc': 'Piece', 'N/A': 'Unknown'})
 
-    for col in df.columns:
-        if pd.api.types.is_object_dtype(df[col]):
-            temp_col = pd.to_numeric(df[col], errors='coerce')
-            if (temp_col.notna().sum() / len(df)) < 0.40:
-                cleaned = df[col].apply(clean_currency_value)
-                temp_col_cleaned = pd.to_numeric(cleaned, errors='coerce')
-                if (temp_col_cleaned.notna().sum() / len(df)) > 0.40:
-                    temp_col = temp_col_cleaned
-                    logs.append(f"Smart-Parsed '{col}' as Numeric")
-            if (temp_col.notna().sum() / len(df)) > 0.40: df[col] = temp_col
+    if run_numeric_parsing:
+        for col in df.columns:
+            if pd.api.types.is_object_dtype(df[col]):
+                temp_col = pd.to_numeric(df[col], errors='coerce')
+                if (temp_col.notna().sum() / len(df)) < 0.40:
+                    cleaned = df[col].apply(clean_currency_value)
+                    temp_col_cleaned = pd.to_numeric(cleaned, errors='coerce')
+                    if (temp_col_cleaned.notna().sum() / len(df)) > 0.40:
+                        temp_col = temp_col_cleaned
+                        logs.append(f"Smart-Parsed '{col}' as Numeric")
+                if (temp_col.notna().sum() / len(df)) > 0.40: df[col] = temp_col
 
-    df = smart_text_correction(df, logs)
+    if run_typo_correction:
+        df = smart_text_correction(df, logs, threshold=typo_threshold)
 
     for col in df.columns:
-        if 'date' in col.lower() or 'time' in col.lower():
+        if run_date_formatting and ('date' in col.lower() or 'time' in col.lower()):
             df[col] = smart_parse_dates(df[col])
             logs.append(f"Formatted {col} to DateTime")
         if pd.api.types.is_numeric_dtype(df[col]):
             if df[col].isnull().sum() > 0:
-                med = df[col].median()
-                if pd.isna(med): med = 0
-                df[col] = df[col].fillna(med)
+                if impute_numeric == "median":
+                    med = df[col].median()
+                    if pd.isna(med): med = 0
+                    df[col] = df[col].fillna(med)
+                    logs.append(f"Imputed missing in '{col}' with Median")
+                elif impute_numeric == "mean":
+                    mean_val = df[col].mean()
+                    if pd.isna(mean_val): mean_val = 0
+                    df[col] = df[col].fillna(mean_val)
+                    logs.append(f"Imputed missing in '{col}' with Mean")
+                elif impute_numeric == "mode":
+                    mode_series = df[col].mode()
+                    mode_val = mode_series.iloc[0] if not mode_series.empty else 0
+                    df[col] = df[col].fillna(mode_val)
+                    logs.append(f"Imputed missing in '{col}' with Mode")
+                elif impute_numeric == "zero":
+                    df[col] = df[col].fillna(0)
+                    logs.append(f"Imputed missing in '{col}' with Zero")
+                elif impute_numeric == "remove":
+                    df = df.dropna(subset=[col])
+                    logs.append(f"Removed rows with missing values in '{col}'")
 
     before_dedup = len(df)
     df = df.drop_duplicates()
@@ -288,21 +308,37 @@ def process_dataset(file_content, filename, mask_pii=True):
         if pii_count > 0: logs.append(f"🔒 Masked {pii_count} PII items")
 
     df_for_ai = df.copy()
-    numeric_cols_model = df_for_ai.select_dtypes(include=[np.number]).columns.tolist()
     categorical_cols = df.select_dtypes(include=['object', 'category']).columns
     for col in categorical_cols:
         le = LabelEncoder()
         df_for_ai[col] = le.fit_transform(df[col].astype(str))
     
+    numeric_cols_model = df_for_ai.select_dtypes(include=[np.number]).columns.tolist()
+    
     anomaly_count = 0
-    if len(numeric_cols_model) > 0:
+    anomaly_list = []
+    if anomaly_contamination > 0.0 and len(numeric_cols_model) > 0:
         df_for_ai = df_for_ai.fillna(0)
         scaler = StandardScaler()
         scaled_data = scaler.fit_transform(df_for_ai[numeric_cols_model])
-        iso = IsolationForest(contamination=0.05, random_state=42)
+        iso = IsolationForest(contamination=anomaly_contamination, random_state=42)
         preds = iso.fit_predict(scaled_data)
         df['anomaly_score'] = preds
         anomaly_count = list(preds).count(-1)
+        
+        # Extract details of the first 8 flagged anomalies
+        anom_df = df[df['anomaly_score'] == -1]
+        for idx, row in anom_df.head(8).iterrows():
+            row_desc = {}
+            for col in numeric_cols_model[:3]:  # Capture key numeric markers
+                val = row[col]
+                if not pd.isna(val):
+                    row_desc[col] = float(val) if isinstance(val, (int, float, np.number)) else str(val)
+            anomaly_list.append({
+                "row_index": int(idx),
+                "columns": row_desc
+            })
+            
         df_clean = df[df['anomaly_score'] == 1].drop(columns=['anomaly_score'])
     else:
         df_clean = df
@@ -335,7 +371,8 @@ def process_dataset(file_content, filename, mask_pii=True):
         "summary": smart_summary,
         "generated_sql": generated_sql,
         "column_stats": column_stats,
-        "correlation_matrix": correlation_matrix
+        "correlation_matrix": correlation_matrix,
+        "anomaly_list": anomaly_list
     }
 
     return df_clean, insights, preview_original, preview_cleaned

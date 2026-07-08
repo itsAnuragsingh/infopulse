@@ -24,14 +24,14 @@ HASH_DB_FILE = "cleaned_file_hashes.json"
 def load_known_hashes():
     if os.path.exists(HASH_DB_FILE):
         try:
-            with open(HASH_DB_FILE, "r") as f: return set(json.load(f))
+            with open(HASH_DB_FILE, "r", encoding="utf-8") as f: return set(json.load(f))
         except: return set()
     return set()
 
 def save_new_hash(file_hash):
     hashes = load_known_hashes()
     hashes.add(file_hash)
-    with open(HASH_DB_FILE, "w") as f: json.dump(list(hashes), f)
+    with open(HASH_DB_FILE, "w", encoding="utf-8") as f: json.dump(list(hashes), f)
 
 def calculate_hash(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
@@ -85,6 +85,7 @@ class Insights(BaseModel):
     generated_sql: str
     column_stats: List[Dict[str, Any]]
     correlation_matrix: List[Dict[str, Any]]
+    anomaly_list: Optional[List[Dict[str, Any]]] = []
 
 class DataResponse(BaseModel):
     request_id: str
@@ -103,7 +104,16 @@ class AskResponse(BaseModel):
 # --- Endpoints ---
 
 @app.post("/upload", response_model=DataResponse)
-async def upload_file(file: UploadFile = File(...), mask_pii: bool = Form(True)):
+async def upload_file(
+    file: UploadFile = File(...),
+    mask_pii: bool = Form(True),
+    impute_numeric: str = Form("median"),
+    anomaly_contamination: float = Form(0.05),
+    run_typo_correction: bool = Form(True),
+    typo_threshold: float = Form(0.75),
+    run_date_formatting: bool = Form(True),
+    run_numeric_parsing: bool = Form(True)
+):
     request_id = datetime.now().strftime("%Y%m%d%H%M%S") + "_" + str(np.random.randint(1000, 9999))
     
     try: file_content = await file.read()
@@ -140,7 +150,7 @@ async def upload_file(file: UploadFile = File(...), mask_pii: bool = Form(True))
             correlation_matrix=get_correlation_matrix(df)
         )
         
-        with open(os.path.join(CLEANED_DIR, f"{request_id}_insights.json"), "w") as f:
+        with open(os.path.join(CLEANED_DIR, f"{request_id}_insights.json"), "w", encoding="utf-8") as f:
             f.write(insights.json())
 
         uploaded_filepath = os.path.join(UPLOAD_DIR, f"{request_id}{os.path.splitext(file.filename)[1]}")
@@ -155,7 +165,17 @@ async def upload_file(file: UploadFile = File(...), mask_pii: bool = Form(True))
     uploaded_filepath = os.path.join(UPLOAD_DIR, f"{request_id}{file_extension}")
     try:
         with open(uploaded_filepath, "wb") as buffer: buffer.write(file_content)
-        df_cleaned, insights_dict, preview_original, preview_cleaned = process_dataset(file_content, file.filename, mask_pii)
+        df_cleaned, insights_dict, preview_original, preview_cleaned = process_dataset(
+            file_content=file_content,
+            filename=file.filename,
+            mask_pii=mask_pii,
+            impute_numeric=impute_numeric,
+            anomaly_contamination=anomaly_contamination,
+            run_typo_correction=run_typo_correction,
+            typo_threshold=typo_threshold,
+            run_date_formatting=run_date_formatting,
+            run_numeric_parsing=run_numeric_parsing
+        )
         
         cleaned_csv_str = df_cleaned.to_csv(index=False)
         cleaned_hash = calculate_hash(cleaned_csv_str.encode('utf-8'))
@@ -163,13 +183,17 @@ async def upload_file(file: UploadFile = File(...), mask_pii: bool = Form(True))
         
         insights = Insights(request_id=request_id, **insights_dict)
         
-        with open(os.path.join(CLEANED_DIR, f"{request_id}_insights.json"), "w") as f:
+        with open(os.path.join(CLEANED_DIR, f"{request_id}_insights.json"), "w", encoding="utf-8") as f:
             f.write(insights.json())
 
     except ValueError as e:
+        import traceback
+        traceback.print_exc()
         if os.path.exists(uploaded_filepath): os.remove(uploaded_filepath)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         if os.path.exists(uploaded_filepath): os.remove(uploaded_filepath)
         raise HTTPException(status_code=500, detail=f"Server Error: {e}")
 
@@ -202,7 +226,7 @@ async def download_file(request_id: str, format: str = "csv"):
              raise HTTPException(status_code=404, detail="Insights data for report not found.")
              
         if not os.path.exists(pdf_path):
-            with open(insights_path, 'r') as f: insights = json.load(f)
+            with open(insights_path, 'r', encoding='utf-8') as f: insights = json.load(f)
             df = pd.read_csv(cleaned_filepath)
             generate_pdf_report(df, insights, pdf_path)
             
