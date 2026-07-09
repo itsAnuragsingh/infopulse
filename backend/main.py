@@ -12,6 +12,8 @@ import re
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from contextlib import asynccontextmanager
+from google import genai
+from google.genai import types
 
 from data_processor import process_dataset, get_correlation_matrix, get_column_stats, generate_pdf_report
 
@@ -100,6 +102,143 @@ class AskRequest(BaseModel):
 class AskResponse(BaseModel):
     filter_string: str
     explanation: str
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    message: str
+    history: List[ChatMessage]
+    insights: Dict[str, Any]
+    filename: Optional[str] = "dataset.csv"
+
+class ChatResponse(BaseModel):
+    response: str
+
+# --- Helper: Gemini API Call ---
+def get_gemini_api_key():
+    # 1. Check environment variables
+    key = os.environ.get("GEMINI_API_KEY")
+    if key:
+        return key.strip()
+    
+    # 2. Check for a .env file in common locations
+    env_paths = [".env", "backend/.env", "../.env"]
+    for path in env_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            if k.strip() == "GEMINI_API_KEY":
+                                return v.strip().strip("'").strip('"')
+            except:
+                pass
+    return None
+
+def call_gemini_api(prompt: str, api_key: str, history: List[ChatMessage] = None, system_prompt: str = "") -> str:
+    try:
+        client = genai.Client(api_key=api_key)
+        
+        # Build contents structure from history
+        contents = []
+        if history:
+            for msg in history:
+                role = "user" if msg.role == "user" else "model"
+                contents.append({
+                    "role": role,
+                    "parts": [{"text": msg.content}]
+                })
+        
+        # Append latest message if not in history
+        if not history or history[-1].content != prompt:
+            contents.append({
+                "role": "user",
+                "parts": [{"text": prompt}]
+            })
+            
+        config = types.GenerateContentConfig(
+            system_instruction=system_prompt
+        )
+        
+        models_to_try = ['gemini-3.5-flash', 'gemini-2.5-flash', 'gemini-1.5-flash']
+        last_error = None
+        
+        for model_name in models_to_try:
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=contents,
+                    config=config
+                )
+                return response.text
+            except Exception as e:
+                last_error = str(e)
+                print(f"Model {model_name} failed: {last_error}")
+                continue
+                
+        return f"Error from Google GenAI SDK (Tried {', '.join(models_to_try)}): {last_error}"
+    except Exception as e:
+        return f"Failed to initialize Google GenAI SDK: {str(e)}"
+
+# --- Helper: Groq API Call ---
+def get_groq_api_key():
+    # 1. Check environment variables
+    key = os.environ.get("GROQ_API_KEY")
+    if key:
+        return key.strip()
+    
+    # 2. Check for a .env file in common locations
+    env_paths = [".env", "backend/.env", "../.env"]
+    for path in env_paths:
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if "=" in line and not line.startswith("#"):
+                            k, v = line.split("=", 1)
+                            if k.strip() == "GROQ_API_KEY":
+                                return v.strip().strip("'").strip('"')
+            except:
+                pass
+    return None
+
+def call_groq_api(prompt: str, api_key: str, history: List[ChatMessage] = None, system_prompt: str = "") -> str:
+    try:
+        from groq import Groq
+        client = Groq(api_key=api_key)
+        
+        messages = []
+        if system_prompt:
+            messages.append({
+                "role": "system",
+                "content": system_prompt
+            })
+        if history:
+            for msg in history:
+                role = "user" if msg.role == "user" else "assistant"
+                messages.append({
+                    "role": role,
+                    "content": msg.content
+                })
+        if not history or history[-1].content != prompt:
+            messages.append({
+                "role": "user",
+                "content": prompt
+            })
+
+        chat_completion = client.chat.completions.create(
+            messages=messages,
+            model="llama-3.3-70b-versatile"
+        )
+        return chat_completion.choices[0].message.content
+    except Exception as e:
+        return f"Error from Groq SDK: {str(e)}"
+
 
 # --- Endpoints ---
 
@@ -210,6 +349,85 @@ async def ask_ai(request: AskRequest):
         return AskResponse(filter_string=filter_str, explanation=f"Applying filter: {filter_str}")
     except Exception as e: raise HTTPException(status_code=500, detail=str(e))
 
+@app.post("/chat", response_model=ChatResponse)
+async def chat_with_dataset(request: ChatRequest):
+    gemini_key = get_gemini_api_key()
+    groq_key = get_groq_api_key()
+    
+    if not gemini_key and not groq_key:
+        return ChatResponse(
+            response="⚠️ **API Keys are missing!**\n\nPlease add a `.env` file in the project directory containing either `GEMINI_API_KEY=your_key` or `GROQ_API_KEY=your_key`, and restart your server."
+        )
+        
+    insights = request.insights
+    cols = insights.get("column_stats", [])
+    summary_text = insights.get("summary", "No summary available.")
+    
+    col_breakdown = []
+    for c in cols:
+        col_breakdown.append(
+            f"- {c.get('name')} (Type: {c.get('type')}, Missing: {c.get('missing')}, Unique: {c.get('unique')}, Sample: {c.get('sample')})"
+        )
+    col_breakdown_str = "\n".join(col_breakdown)
+    
+    system_prompt = f"""You are the InfoPulse AI Data Assistant, a highly capable data scientist and general AI assistant.
+You are helping the user with data cleaning, analysis, general data science topics, coding, and general conversational queries.
+
+The user has uploaded a dataset named '{request.filename}'. Here is the metadata profiling generated by our pipeline:
+- Original Rows: {insights.get('rows_original')}
+- Cleaned Rows: {insights.get('rows_cleaned')}
+- Duplicate Rows Removed: {insights.get('duplicates_removed')}
+- Outlier Anomalies Detected: {insights.get('anomalies_detected')}
+- PII Masked Instances: {insights.get('pii_masked')}
+- Data Quality Index (Health Score): {insights.get('quality_score')}%
+- Cleaning Summary: {summary_text}
+
+Dataset Column Schema & Profiling Stats:
+{col_breakdown_str}
+
+Guidelines for your responses:
+1. You can answer general conversation, greetings, and generic coding/data science/machine learning questions naturally.
+2. When the user asks about the loaded dataset, refer to the provided insights and schema details.
+3. If the user asks about the schema, column stats, or tabular data, always present it in a clean markdown table (e.g., | Column Name | Type | Missing | Unique |) for optimal presentation.
+4. If the user asks about anomalies, duplicates, or PII masking, explain how they were handled by the pipeline.
+5. Offer Python/pandas code snippets or SQL queries to help them further analyze or visualize their data when appropriate.
+6. Keep formatting clean, using standard bold tags and bullet points for readability. Use standard text weight for responses.
+"""
+
+    response_text = ""
+    used_gemini = False
+    
+    # 1. Try Gemini first if key is present
+    # if gemini_key:
+    #     used_gemini = True
+    #     response_text = call_gemini_api(
+    #         prompt=request.message,
+    #         api_key=gemini_key,
+    #         history=request.history,
+    #         system_prompt=system_prompt
+    #     )
+    #     
+    #     # If Gemini succeeded, return it
+    #     if not response_text.startswith("Error from Google GenAI SDK"):
+    #         return ChatResponse(response=response_text)
+            
+    # 2. Try Groq if Gemini key was missing OR if Gemini call failed
+    if groq_key:
+        fallback_msg = "*(System: Gemini failed; fell back to Groq Llama 3.3)*\n\n" if used_gemini else ""
+        groq_response = call_groq_api(
+            prompt=request.message,
+            api_key=groq_key,
+            history=request.history,
+            system_prompt=system_prompt
+        )
+        return ChatResponse(response=fallback_msg + groq_response)
+        
+    # If we tried Gemini and failed, and had no Groq key, return the Gemini error
+    if used_gemini:
+        return ChatResponse(response=response_text)
+        
+    return ChatResponse(response="⚠️ Unexpected error resolving API calls.")
+
 @app.get("/download/{request_id}")
 async def download_file(request_id: str, format: str = "csv"):
     cleaned_filepath = os.path.join(CLEANED_DIR, f"{request_id}_cleaned.csv")
@@ -267,7 +485,6 @@ async def download_file(request_id: str, format: str = "csv"):
         return StreamingResponse(sql_buffer, media_type="text/plain", headers={"Content-Disposition": f"attachment; filename=InfoPulse_{request_id}.sql"})
         
     else: raise HTTPException(status_code=400, detail="Invalid format specified.")
-
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run("main:app", host="127.0.0.1", port=8000, reload=True)

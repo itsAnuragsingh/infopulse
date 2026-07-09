@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef, useEffect } from 'react';
 import axios from 'axios';
 import { 
   BarChart, Bar, LineChart, Line, ScatterChart, Scatter, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend, ZAxis 
@@ -7,7 +7,7 @@ import {
   Upload, Download, FileText, AlertTriangle, CheckCircle, Loader2, 
   BarChart3, LineChart as LineIcon, ShieldCheck, Database, LayoutDashboard, Code, Copy, 
   ArrowRight, Filter, Trash2, UserX, Table, PieChart as PieIcon, Activity, ArrowUpDown, Search, X, RefreshCw, FileSpreadsheet, ScatterChart as ScatterIcon, Sparkles, FileText as PdfIcon,
-  Sun, Moon
+  Sun, Moon, MessageSquare, Send
 } from 'lucide-react';
 
 function App() {
@@ -32,6 +32,16 @@ function App() {
   const [runDateFormatting, setRunDateFormatting] = useState(true);
   const [runNumericParsing, setRunNumericParsing] = useState(true);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
+
+  // Chatbot states
+  const [showChat, setShowChat] = useState(false);
+  const [chatMessages, setChatMessages] = useState([
+    { role: 'model', content: 'Hello! I am your InfoPulse AI Data Assistant. Ask me anything about your cleaned dataset, anomalies, column profiles, or SQL exports!' }
+  ]);
+  const [chatInput, setChatInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
+  const [chatWidth, setChatWidth] = useState(480);
+  const [isResizing, setIsResizing] = useState(false);
 
   // Global UI states (Dark/Light mode & Tab additions)
   const [darkMode, setDarkMode] = useState(true);
@@ -59,6 +69,289 @@ function App() {
     setSearchQuery('');
     setAiError('');
     setActiveTab('dashboard');
+    setShowChat(false);
+    setChatMessages([
+      { role: 'model', content: 'Hello! I am your InfoPulse AI Data Assistant. Ask me anything about your cleaned dataset, anomalies, column profiles, or SQL exports!' }
+    ]);
+  };
+
+  const messagesEndRef = useRef(null);
+
+  useEffect(() => {
+    if (messagesEndRef.current) {
+      messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, showChat, chatLoading]);
+
+  const startResizing = (e) => {
+    e.preventDefault();
+    setIsResizing(true);
+  };
+
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (!isResizing) return;
+      const newWidth = window.innerWidth - e.clientX;
+      if (newWidth > 320 && newWidth < window.innerWidth * 0.8) {
+        setChatWidth(newWidth);
+      }
+    };
+
+    const handleMouseUp = () => {
+      setIsResizing(false);
+    };
+
+    if (isResizing) {
+      window.addEventListener('mousemove', handleMouseMove);
+      window.addEventListener('mouseup', handleMouseUp);
+      document.body.style.cursor = 'ew-resize';
+      document.body.style.userSelect = 'none';
+    } else {
+      document.body.style.cursor = 'default';
+      document.body.style.userSelect = 'auto';
+    }
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizing]);
+
+  const CodeBlock = ({ code, language }) => {
+    const [copied, setCopied] = useState(false);
+
+    const handleCopy = () => {
+      navigator.clipboard.writeText(code);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    };
+
+    return (
+      <div className="my-3 border rounded-xl overflow-hidden shadow-inner bg-slate-950 border-slate-900">
+        <div className="flex justify-between items-center px-4 py-2 bg-slate-900 border-b border-slate-950 text-[10px] font-bold text-slate-400 uppercase tracking-wider font-mono">
+          <span>{language}</span>
+          <button 
+            onClick={handleCopy}
+            className="flex items-center space-x-1 hover:text-white transition-colors"
+          >
+            {copied ? <span>Copied!</span> : <span>Copy</span>}
+          </button>
+        </div>
+        <pre className="p-4 overflow-x-auto custom-scrollbar font-mono text-xs text-slate-300 leading-relaxed text-left">
+          <code>{code}</code>
+        </pre>
+      </div>
+    );
+  };
+
+  const highlightKeywords = (text) => {
+    const keywordsRegex = /\b(outlier|outliers|anomaly|anomalies|critical|missing|duplicate|duplicates|error|failed|good|clean|success|resolved|cleaned|formatted)\b/gi;
+    const parts = text.split(keywordsRegex);
+    if (parts.length === 1) return text;
+
+    return parts.map((part, i) => {
+      const lowerPart = part.toLowerCase();
+      if (['outlier', 'outliers', 'anomaly', 'anomalies', 'critical', 'missing', 'duplicate', 'duplicates', 'error', 'failed'].includes(lowerPart)) {
+        return (
+          <span key={i} className="text-rose-600 dark:text-rose-400 font-bold px-0.5">
+            {part}
+          </span>
+        );
+      }
+      if (['good', 'clean', 'success', 'resolved', 'cleaned', 'formatted'].includes(lowerPart)) {
+        return (
+          <span key={i} className="text-emerald-600 dark:text-emerald-400 font-bold px-0.5">
+            {part}
+          </span>
+        );
+      }
+      return part;
+    });
+  };
+
+  const formatTextSegments = (text) => {
+    const parts = text.split(/(\*\*[^*]+\*\*)/g);
+    return parts.map((part, i) => {
+      if (part.startsWith('**') && part.endsWith('**')) {
+        const cleanPart = part.slice(2, -2);
+        return (
+          <strong key={i} className={darkMode ? 'font-bold text-white' : 'font-bold text-slate-800'}>
+            {highlightKeywords(cleanPart)}
+          </strong>
+        );
+      }
+      return <span key={i}>{highlightKeywords(part)}</span>;
+    });
+  };
+
+  const parseTablesAndText = (text, startingKey) => {
+    const lines = text.split('\n');
+    const elements = [];
+    let currentTableLines = [];
+    let isInsideTable = false;
+    let key = startingKey;
+
+    const flushTextAccumulator = (accumulatedLines) => {
+      if (accumulatedLines.length === 0) return;
+      const blockText = accumulatedLines.join('\n');
+      elements.push(
+        <span key={key++} className="block my-1.5 leading-relaxed">
+          {formatTextSegments(blockText)}
+        </span>
+      );
+    };
+
+    const renderParsedTable = (tableLines) => {
+      if (tableLines.length < 2) return null;
+
+      const headerLine = tableLines[0];
+      const headers = headerLine.split('|')
+        .map(cell => cell.trim())
+        .filter((_, i, arr) => i > 0 && i < arr.length - 1);
+
+      const dataLines = tableLines.slice(2);
+      const rows = dataLines.map(line => {
+        return line.split('|')
+          .map(cell => cell.trim())
+          .filter((_, i, arr) => i > 0 && i < arr.length - 1);
+      });
+
+      return (
+        <div key={key++} className="my-4 overflow-x-auto border rounded-xl shadow-sm bg-white dark:bg-slate-900 border-indigo-100 dark:border-slate-850">
+          <table className="min-w-full text-xs text-left">
+            <thead className="bg-indigo-50 dark:bg-slate-800 text-indigo-950 dark:text-slate-200 border-b border-indigo-100 dark:border-slate-800 font-bold">
+              <tr>
+                {headers.map((h, i) => (
+                  <th key={i} className="px-4 py-2.5 whitespace-nowrap">{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="text-slate-700 dark:text-slate-350 divide-y divide-indigo-50/50 dark:divide-slate-800/40">
+              {rows.map((row, i) => (
+                <tr key={i} className="hover:bg-indigo-50/20 dark:hover:bg-slate-800/20 transition-colors">
+                  {row.map((cell, j) => (
+                    <td key={j} className="px-4 py-2.5 font-medium whitespace-nowrap">
+                      {formatTextSegments(cell)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      );
+    };
+
+    let textAccumulator = [];
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i].trim();
+      const isTableRow = line.startsWith('|') && line.endsWith('|');
+
+      if (isTableRow) {
+        if (!isInsideTable) {
+          flushTextAccumulator(textAccumulator);
+          textAccumulator = [];
+          isInsideTable = true;
+        }
+        currentTableLines.push(lines[i]);
+      } else {
+        if (isInsideTable) {
+          const renderedTable = renderParsedTable(currentTableLines);
+          if (renderedTable) elements.push(renderedTable);
+          currentTableLines = [];
+          isInsideTable = false;
+        }
+        textAccumulator.push(lines[i]);
+      }
+    }
+
+    if (isInsideTable) {
+      const renderedTable = renderParsedTable(currentTableLines);
+      if (renderedTable) elements.push(renderedTable);
+    } else {
+      flushTextAccumulator(textAccumulator);
+    }
+
+    return elements;
+  };
+
+  const parseMessageContent = (text) => {
+    const codeBlockRegex = /```(\w*)\n([\s\S]*?)\n```/g;
+    const blocks = [];
+    let lastIndex = 0;
+    let match;
+    let key = 0;
+
+    while ((match = codeBlockRegex.exec(text)) !== null) {
+      const textBefore = text.slice(lastIndex, match.index);
+      if (textBefore) {
+        blocks.push({ type: 'text', content: textBefore });
+      }
+
+      blocks.push({
+        type: 'code',
+        language: match[1] || 'code',
+        content: match[2]
+      });
+
+      lastIndex = codeBlockRegex.lastIndex;
+    }
+
+    const textAfter = text.slice(lastIndex);
+    if (textAfter) {
+      blocks.push({ type: 'text', content: textAfter });
+    }
+
+    const finalElements = [];
+    blocks.forEach((block) => {
+      if (block.type === 'code') {
+        finalElements.push(
+          <CodeBlock key={key++} code={block.content} language={block.language} />
+        );
+      } else {
+        const parsedTextAndTables = parseTablesAndText(block.content, key);
+        key += parsedTextAndTables.length;
+        finalElements.push(...parsedTextAndTables);
+      }
+    });
+
+    return finalElements;
+  };
+
+  const handleSendChatMessage = async (customMessage = null) => {
+    const textToSend = customMessage || chatInput;
+    if (!textToSend.trim() || chatLoading) return;
+
+    const userMessage = { role: 'user', content: textToSend };
+    const updatedMessages = [...chatMessages, userMessage];
+    setChatMessages(updatedMessages);
+    setChatInput('');
+    setChatLoading(true);
+
+    try {
+      const backendHistory = chatMessages.map(msg => ({
+        role: msg.role,
+        content: msg.content
+      }));
+
+      const response = await axios.post('http://localhost:8000/chat', {
+        message: textToSend,
+        history: backendHistory,
+        insights: data.insights,
+        filename: file?.name || 'dataset.csv'
+      });
+
+      setChatMessages(prev => [...prev, { role: 'model', content: response.data.response }]);
+    } catch (err) {
+      console.error(err);
+      setChatMessages(prev => [
+        ...prev,
+        { role: 'model', content: '❌ **Failed to contact AI Assistant.** Please verify the backend is running and GEMINI_API_KEY is configured properly.' }
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
   };
 
   const handleUpload = async () => {
@@ -1611,6 +1904,177 @@ function App() {
                 </button>
               </div>
             </footer>
+
+            {/* AI Chatbot Floating Widget */}
+            {!showChat && (
+              <button
+                onClick={() => setShowChat(true)}
+                className={`fixed bottom-6 right-6 z-40 flex items-center space-x-2.5 px-6 py-4 rounded-2xl shadow-2xl transition-all duration-300 hover:scale-105 active:scale-95 group border bg-gradient-to-r from-indigo-600 via-indigo-700 to-purple-600 text-white border-white/20 font-extrabold text-xs uppercase tracking-wider shadow-indigo-500/20`}
+                title="Chat with Dataset AI"
+              >
+                <MessageSquare className="w-4 h-4 text-white" />
+                <span>Chat with your Data</span>
+              </button>
+            )}
+
+            {showChat && (
+              <div 
+                style={{ width: `${chatWidth}px` }}
+                className={`fixed top-0 right-0 h-full max-w-full z-50 flex flex-col border-l shadow-2xl overflow-hidden transition-colors duration-300 ${
+                  darkMode 
+                    ? 'bg-slate-950 border-slate-800/80 text-slate-100 shadow-black' 
+                    : 'bg-white border-slate-200 text-slate-900 shadow-slate-300/30'
+                }`}
+              >
+                {/* Drag Handle for Resizing */}
+                <div 
+                  onMouseDown={startResizing}
+                  className={`absolute top-0 left-0 bottom-0 w-[5px] cursor-ew-resize hover:bg-indigo-500/40 transition-colors z-50 flex items-center justify-center group`}
+                >
+                  <div className="w-[1px] h-8 bg-slate-500/20 group-hover:bg-indigo-500/80 group-hover:scale-y-125 transition-all rounded" />
+                </div>
+                {/* Header */}
+                <div className={`p-5 border-b flex justify-between items-center ${
+                  darkMode ? 'bg-slate-900 border-slate-800/80' : 'bg-indigo-50/40 border-indigo-100/50'
+                }`}>
+                  <div className="flex items-center space-x-3">
+                    <div className="bg-gradient-to-br from-indigo-500 to-purple-500 p-2.5 rounded-xl text-white shadow-md">
+                      <Sparkles size={18} />
+                    </div>
+                    <div>
+                      <div className="flex items-center space-x-2">
+                        <span className="text-sm font-extrabold tracking-wide">InfoPulse AI Assistant</span>
+                        <span className="w-2 h-2 bg-emerald-500 rounded-full"></span>
+                      </div>
+                      <span className="block text-[9px] text-indigo-500 dark:text-indigo-400 font-semibold uppercase tracking-wider font-mono">Online</span>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => setShowChat(false)} 
+                    className={`p-2 rounded-full border transition-colors ${
+                      darkMode 
+                        ? 'bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-400 hover:text-slate-200' 
+                        : 'bg-indigo-50 hover:bg-indigo-100 border-indigo-100 text-indigo-650 hover:text-indigo-800'
+                    }`}
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+
+                {/* Chat Messages */}
+                <div className="flex-1 overflow-y-auto p-5 space-y-4 custom-scrollbar min-h-0">
+                  {chatMessages.map((msg, i) => {
+                    const isBot = msg.role === 'model';
+                    return (
+                      <div key={i} className={`flex items-start space-x-2.5 ${isBot ? 'justify-start' : 'justify-end'} animate-fade-in-up`}>
+                        {isBot && (
+                          <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 shadow-sm ${
+                            darkMode ? 'bg-slate-900 border border-slate-800 text-indigo-400' : 'bg-indigo-50 border border-indigo-100 text-indigo-600'
+                          }`}>
+                            <Sparkles size={13} />
+                          </div>
+                        )}
+                        <div className={`flex flex-col ${isBot ? 'items-start' : 'items-end'} max-w-[80%]`}>
+                          <div 
+                            className={`text-base px-4 py-3 shadow-sm leading-relaxed whitespace-pre-wrap font-normal ${
+                              isBot 
+                                ? darkMode 
+                                  ? 'bg-slate-900 border border-slate-850 text-slate-100 rounded-2xl rounded-tl-none shadow-inner' 
+                                  : 'bg-indigo-50/80 border border-indigo-100/80 text-indigo-950 rounded-2xl rounded-tl-none shadow-sm'
+                                : 'bg-indigo-600 text-white rounded-2xl rounded-tr-none shadow-md'
+                            }`}
+                          >
+                            {isBot ? parseMessageContent(msg.content) : msg.content}
+                          </div>
+                          <span className="text-[8px] font-bold text-slate-500 mt-1 uppercase px-1 font-mono tracking-wider">
+                            {isBot ? 'AI Assistant' : 'You'}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  
+                  {chatLoading && (
+                    <div className="flex items-start space-x-2.5 justify-start animate-fade-in-up">
+                      <div className={`w-7 h-7 rounded-lg flex items-center justify-center shrink-0 shadow-sm ${
+                        darkMode ? 'bg-slate-900 border border-slate-800 text-indigo-400' : 'bg-indigo-50 border border-indigo-100 text-indigo-600'
+                      }`}>
+                        <Sparkles size={13} />
+                      </div>
+                      <div className="flex flex-col items-start max-w-[80%]">
+                        <div className={`text-base px-4 py-3 rounded-2xl rounded-tl-none shadow-sm italic font-medium ${
+                          darkMode ? 'bg-slate-900 border border-slate-850 text-slate-350' : 'bg-indigo-50/80 border border-indigo-100/80 text-indigo-700'
+                        }`}>
+                          AI is generating response...
+                        </div>
+                        <span className="text-[8px] font-bold text-slate-505 mt-1 uppercase px-1 font-mono tracking-wider">
+                          AI Copilot
+                        </span>
+                      </div>
+                    </div>
+                  )}
+                  
+                  <div ref={messagesEndRef} />
+                </div>
+
+                {/* Quick-question chips */}
+                <div className={`px-5 py-3 border-t flex flex-wrap gap-2.5 ${
+                  darkMode ? 'border-slate-800 bg-slate-950/20' : 'border-indigo-100/80 bg-indigo-50/10'
+                }`}>
+                  {[
+                    { label: '📊 Summarize Dataset', text: 'Provide a brief summary and main insights of this dataset.' },
+                    { label: '⚠️ View Outliers', text: 'What outlier anomalies were detected in the dataset and in which columns?' },
+                    { label: '⚙️ Schema Info', text: 'Explain the columns, data types, and missing values profile of my dataset.' }
+                  ].map((chip, idx) => (
+                    <button
+                      key={idx}
+                      onClick={() => handleSendChatMessage(chip.text)}
+                      disabled={chatLoading}
+                      className={`text-[11px] font-bold px-3.5 py-1.5 rounded-full border transition-all hover:scale-102 hover:-translate-y-0.5 active:translate-y-0 disabled:opacity-50 disabled:pointer-events-none select-none ${
+                        darkMode 
+                          ? 'bg-slate-900 border-slate-800 text-indigo-300 hover:bg-slate-800 hover:text-indigo-400 hover:border-indigo-500/50 shadow-sm' 
+                          : 'bg-indigo-50/50 border-indigo-100 text-indigo-700 hover:bg-indigo-50 hover:text-indigo-800 hover:border-indigo-200 shadow-sm'
+                      }`}
+                    >
+                      {chip.label}
+                    </button>
+                  ))}
+                </div>
+
+                {/* Footer Input */}
+                <div className={`p-4 border-t flex items-center space-x-2.5 ${
+                  darkMode ? 'bg-slate-900 border-slate-800/80' : 'bg-indigo-50/40 border-indigo-100/50'
+                }`}>
+                  <input 
+                    type="text" 
+                    placeholder="Ask a question about your data..." 
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') handleSendChatMessage();
+                    }}
+                    disabled={chatLoading}
+                    className={`flex-1 border rounded-xl px-4 py-3 text-sm font-semibold tracking-wide outline-none transition-all disabled:opacity-60 ${
+                      darkMode 
+                        ? 'border-slate-800 bg-slate-950 text-slate-100 placeholder-slate-500 focus:border-indigo-500/50 shadow-inner' 
+                        : 'border-slate-200 bg-white text-slate-900 placeholder-slate-400 focus:border-indigo-500 shadow-inner'
+                    }`}
+                  />
+                  <button
+                    onClick={() => handleSendChatMessage()}
+                    disabled={!chatInput.trim() || chatLoading}
+                    className={`p-3 rounded-xl border transition-all flex items-center justify-center disabled:opacity-50 disabled:scale-100 disabled:translate-y-0 ${
+                      darkMode 
+                        ? 'bg-indigo-600 hover:bg-indigo-700 border-indigo-500 text-white active:scale-95 shadow-md shadow-indigo-600/10' 
+                        : 'bg-indigo-600 hover:bg-indigo-700 border-indigo-500 text-white active:scale-95 shadow-md'
+                    }`}
+                    title="Send Message"
+                  >
+                    <Send size={14} />
+                  </button>
+                </div>
+              </div>
+            )}
           </main>
         </div>
       )}
