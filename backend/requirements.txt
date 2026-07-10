@@ -8,4 +8,7 @@ openpyxl==3.1.2
 pydantic>=2.0.0
 google-genai
 groq
+reportlab
+matplotlib
+
 
