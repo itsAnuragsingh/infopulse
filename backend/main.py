@@ -123,8 +123,15 @@ def get_gemini_api_key():
     if key:
         return key.strip()
     
-    # 2. Check for a .env file in common locations
-    env_paths = [".env", "backend/.env", "../.env"]
+    # 2. Check for a .env file in common locations relative to this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    env_paths = [
+        os.path.join(script_dir, ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        ".env",
+        "backend/.env",
+        "../.env"
+    ]
     for path in env_paths:
         if os.path.exists(path):
             try:
@@ -191,8 +198,15 @@ def get_groq_api_key():
     if key:
         return key.strip()
     
-    # 2. Check for a .env file in common locations
-    env_paths = [".env", "backend/.env", "../.env"]
+    # 2. Check for a .env file in common locations relative to this script
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    env_paths = [
+        os.path.join(script_dir, ".env"),
+        os.path.join(script_dir, "..", ".env"),
+        ".env",
+        "backend/.env",
+        "../.env"
+    ]
     for path in env_paths:
         if os.path.exists(path):
             try:
@@ -290,7 +304,7 @@ async def upload_file(
         )
         
         with open(os.path.join(CLEANED_DIR, f"{request_id}_insights.json"), "w", encoding="utf-8") as f:
-            f.write(insights.json())
+            f.write(insights.model_dump_json())
 
         uploaded_filepath = os.path.join(UPLOAD_DIR, f"{request_id}{os.path.splitext(file.filename)[1]}")
         cleaned_filepath = os.path.join(CLEANED_DIR, f"{request_id}_cleaned.csv")
@@ -323,7 +337,7 @@ async def upload_file(
         insights = Insights(request_id=request_id, **insights_dict)
         
         with open(os.path.join(CLEANED_DIR, f"{request_id}_insights.json"), "w", encoding="utf-8") as f:
-            f.write(insights.json())
+            f.write(insights.model_dump_json())
 
     except ValueError as e:
         import traceback
@@ -398,18 +412,18 @@ Guidelines for your responses:
     used_gemini = False
     
     # 1. Try Gemini first if key is present
-    # if gemini_key:
-    #     used_gemini = True
-    #     response_text = call_gemini_api(
-    #         prompt=request.message,
-    #         api_key=gemini_key,
-    #         history=request.history,
-    #         system_prompt=system_prompt
-    #     )
-    #     
-    #     # If Gemini succeeded, return it
-    #     if not response_text.startswith("Error from Google GenAI SDK"):
-    #         return ChatResponse(response=response_text)
+    if gemini_key:
+        used_gemini = True
+        response_text = call_gemini_api(
+            prompt=request.message,
+            api_key=gemini_key,
+            history=request.history,
+            system_prompt=system_prompt
+        )
+        
+        # If Gemini succeeded, return it
+        if not response_text.startswith("Error from Google GenAI SDK") and not response_text.startswith("Failed to initialize Google GenAI SDK"):
+            return ChatResponse(response=response_text)
             
     # 2. Try Groq if Gemini key was missing OR if Gemini call failed
     if groq_key:
@@ -420,13 +434,18 @@ Guidelines for your responses:
             history=request.history,
             system_prompt=system_prompt
         )
-        return ChatResponse(response=fallback_msg + groq_response)
+        if not groq_response.startswith("Error from Groq SDK"):
+            return ChatResponse(response=fallback_msg + groq_response)
+        else:
+            if used_gemini:
+                return ChatResponse(response=f"⚠️ **Both API providers failed to respond.**\n\n**Gemini Error:** {response_text}\n\n**Groq Error:** {groq_response}")
+            return ChatResponse(response=f"⚠️ **Groq API failed:** {groq_response}")
         
     # If we tried Gemini and failed, and had no Groq key, return the Gemini error
     if used_gemini:
         return ChatResponse(response=response_text)
         
-    return ChatResponse(response="⚠️ Unexpected error resolving API calls.")
+    return ChatResponse(response="⚠️ Unexpected error resolving API calls. Please verify your keys in the .env file.")
 
 @app.get("/download/{request_id}")
 async def download_file(request_id: str, format: str = "csv"):
