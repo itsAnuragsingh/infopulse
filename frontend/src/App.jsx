@@ -1819,7 +1819,7 @@ function App() {
             {!showChat && (
               <button
                 onClick={() => setShowChat(true)}
-                className={`fixed bottom-6 right-6 z-40 flex items-center space-x-2.5 px-6 py-4 rounded-2xl shadow-2xl transition-all duration-300 hover:scale-105 active:scale-95 group border bg-gradient-to-r from-indigo-600 via-indigo-700 to-purple-600 text-white border-white/20 font-extrabold text-xs uppercase tracking-wider shadow-indigo-500/20`}
+                className={`fixed bottom-24 right-6 z-40 flex items-center space-x-2.5 px-6 py-4 rounded-2xl shadow-2xl transition-all duration-300 hover:scale-105 active:scale-95 group border bg-gradient-to-r from-indigo-600 via-indigo-700 to-purple-600 text-white border-white/20 font-extrabold text-xs uppercase tracking-wider shadow-indigo-500/20`}
                 title="Chat with Dataset AI"
               >
                 <MessageSquare className="w-4 h-4 text-white" />
